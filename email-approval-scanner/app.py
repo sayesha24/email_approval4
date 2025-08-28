@@ -27,7 +27,7 @@ except ImportError as e:
     st.error(f"ML libraries missing: {e}")
     st.stop()
 
-# Gmail API imports for real message IDs
+# Gmail API imports
 GMAIL_API_AVAILABLE = False
 try:
     from googleapiclient.discovery import build
@@ -249,47 +249,30 @@ class StrictApprovalAIModel:
         }
 
 class GmailAPIScanner:
-    """Gmail API scanner that uses uploaded credentials"""
+    """Gmail API scanner that uses pre-authenticated tokens"""
     
-    def __init__(self, email, password, credentials_data):
+    def __init__(self, email, password, credentials_data, token_data):
         self.email = email
         self.password = password
         self.credentials_data = credentials_data
+        self.token_data = token_data
         self.service = None
         self.ai_model = StrictApprovalAIModel()
         self.scopes = ['https://www.googleapis.com/auth/gmail.readonly']
     
     def authenticate_gmail_api(self):
-        """Authenticate with Gmail API using uploaded credentials"""
+        """Authenticate with Gmail API using pre-authenticated token"""
         try:
-            # Create temporary file with credentials data
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
-                json.dump(self.credentials_data, temp_file)
-                temp_credentials_path = temp_file.name
+            # Use the uploaded token data directly
+            creds = Credentials.from_authorized_user_info(self.token_data, self.scopes)
             
-            creds = None
-            
-            # Check if token exists in session state
-            if 'gmail_token' in st.session_state:
-                try:
-                    creds = Credentials.from_authorized_user_info(st.session_state.gmail_token, self.scopes)
-                except:
-                    creds = None
-            
-            # If there are no (valid) credentials available, let the user log in
-            if not creds or not creds.valid:
-                if creds and creds.expired and creds.refresh_token:
+            # Refresh token if expired
+            if not creds.valid:
+                if creds.expired and creds.refresh_token:
                     creds.refresh(Request())
                 else:
-                    flow = InstalledAppFlow.from_client_secrets_file(
-                        temp_credentials_path, self.scopes)
-                    creds = flow.run_local_server(port=0)
-                
-                # Save the credentials to session state
-                st.session_state.gmail_token = json.loads(creds.to_json())
-            
-            # Clean up temp file
-            os.unlink(temp_credentials_path)
+                    st.error("Token has expired and cannot be refreshed. Please generate a new token.json file.")
+                    return False
             
             self.service = build('gmail', 'v1', credentials=creds)
             return True
@@ -455,12 +438,9 @@ def generate_gmail_link(email_data, gmail_account_index, user_email):
         if not message_id:
             # Fallback to email_id if gmail_message_id is not available
             email_id = email_data.get('email_id', '')
-            if email_id.isdigit():
-                message_id = format(int(email_id), 'x')
-            else:
-                message_id = email_id
+            message_id = email_id
         
-        # Use the exact format that was working before
+        # Use the exact format that works with real Gmail message IDs
         gmail_url = f"https://mail.google.com/mail/u/{gmail_account_index}/?authuser={user_email}#all/{message_id}"
         return gmail_url
         
@@ -470,7 +450,7 @@ def generate_gmail_link(email_data, gmail_account_index, user_email):
 
 def main():
     st.title("🤖 STRICT AI Email Approval Scanner")
-    st.caption("AI-powered crane approval detection - Upload your Gmail API credentials to get started!")
+    st.caption("AI-powered crane approval detection - Upload your Gmail API credentials and token to get started!")
     
     # Initialize session state
     if 'gmail_account_index' not in st.session_state:
@@ -480,47 +460,71 @@ def main():
     with st.sidebar:
         st.header("Configuration")
         
-        # Gmail API credentials upload
+        # Gmail API credentials and token upload
         st.subheader("Gmail API Setup")
         
         if not GMAIL_API_AVAILABLE:
-            st.error("Gmail API libraries not installed. This app requires Gmail API for direct email links.")
-            st.info("Install with: pip install google-api-python-client google-auth google-auth-oauthlib")
+            st.error("Gmail API libraries not installed. Install with: pip install google-api-python-client google-auth google-auth-oauthlib")
             return
         
-        uploaded_creds = st.file_uploader(
-            "Upload Gmail API credentials.json", 
-            type="json",
-            help="Download from Google Cloud Console > APIs & Services > Credentials"
-        )
+        # Step-by-step instructions
+        with st.expander("How to get Gmail API files", expanded=True):
+            st.markdown("""
+            **Step 1: Get credentials.json**
+            1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+            2. Create project → Enable Gmail API  
+            3. Create Credentials → Desktop Application
+            4. Download credentials.json
+            
+            **Step 2: Generate token.json locally**
+            1. Run this Python script on your computer:
+            ```python
+            from google_auth_oauthlib.flow import InstalledAppFlow
+            import json
+            
+            SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+            
+            with open('token.json', 'w') as token:
+                token.write(creds.to_json())
+            print("Token saved to token.json")
+            ```
+            2. Upload both files here
+            """)
+        
+        # File uploads
+        uploaded_creds = st.file_uploader("Upload credentials.json", type="json", key="creds")
+        uploaded_token = st.file_uploader("Upload token.json", type="json", key="token")
         
         credentials_data = None
+        token_data = None
+        
         if uploaded_creds:
             try:
                 credentials_data = json.loads(uploaded_creds.read())
-                st.success("✅ Gmail API credentials loaded!")
+                st.success("✅ Credentials loaded!")
             except Exception as e:
-                st.error(f"Error reading credentials file: {e}")
+                st.error(f"Error reading credentials: {e}")
                 return
-        else:
-            st.warning("Please upload Gmail API credentials.json to continue")
-            with st.expander("How to get Gmail API credentials"):
-                st.markdown("""
-                1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-                2. Create a new project or select existing one
-                3. Enable Gmail API
-                4. Go to "Credentials" → "Create Credentials" → "Desktop Application"  
-                5. Download the JSON file
-                6. Upload it here
-                """)
+        
+        if uploaded_token:
+            try:
+                token_data = json.loads(uploaded_token.read())
+                st.success("✅ Token loaded!")
+            except Exception as e:
+                st.error(f"Error reading token: {e}")
+                return
+        
+        if not credentials_data or not token_data:
+            st.warning("Please upload both credentials.json and token.json files")
             return
         
         st.subheader("Email Settings")
         user_email = st.text_input("Your Gmail Address:", placeholder="your.email@gmail.com")
-        user_password = st.text_input("Gmail App Password:", type="password", help="Not your regular password - create an App Password in Gmail settings")
         
-        if not user_email or not user_password:
-            st.warning("Please enter your Gmail address and app password")
+        if not user_email:
+            st.warning("Please enter your Gmail address")
             return
         
         gmail_account_index = st.selectbox(
@@ -542,11 +546,11 @@ def main():
         max_emails = st.selectbox("Email Limit:", ["ALL", 50, 100, 200], index=1)
     
     # Main interface
-    st.info("All credentials are processed in your session only and are not stored permanently.")
+    st.info("All credentials and tokens are processed in your session only and are not stored permanently.")
     
     # Scan button
     if st.button("🎯 Start STRICT AI Scan", type="primary"):
-        scanner = GmailAPIScanner(user_email, user_password, credentials_data)
+        scanner = GmailAPIScanner(user_email, None, credentials_data, token_data)
         
         max_emails_value = None if max_emails == "ALL" else int(max_emails)
         
